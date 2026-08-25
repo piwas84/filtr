@@ -1,0 +1,599 @@
+(function () {
+    'use strict';
+
+    if (window.content_hiding_plugin) return;
+    window.content_hiding_plugin = true;
+
+    var PREFIX = 'content_hiding_';
+
+    // Налаштування за замовчуванням
+    var settings = {
+        hide_ru: false,
+        hide_asian: false,
+        hide_in: false,
+        hide_tr: false,
+        hide_ar: false,
+        hide_untranslated: false,
+        hide_custom_langs: '',
+        hide_rating: 'none',
+        hide_history: false,
+        hide_words: ''
+    };
+
+    function loadSettings() {
+        settings.hide_ru          = Lampa.Storage.get(PREFIX + 'hide_ru', false);
+        settings.hide_asian       = Lampa.Storage.get(PREFIX + 'hide_asian', false);
+        settings.hide_in          = Lampa.Storage.get(PREFIX + 'hide_in', false);
+        settings.hide_tr          = Lampa.Storage.get(PREFIX + 'hide_tr', false);
+        settings.hide_ar          = Lampa.Storage.get(PREFIX + 'hide_ar', false);
+        settings.hide_untranslated= Lampa.Storage.get(PREFIX + 'hide_untranslated', false);
+        settings.hide_custom_langs= Lampa.Storage.get(PREFIX + 'hide_custom_langs', '');
+        settings.hide_rating      = Lampa.Storage.get(PREFIX + 'hide_rating', 'none');
+        settings.hide_history     = Lampa.Storage.get(PREFIX + 'hide_history', false);
+        settings.hide_words       = Lampa.Storage.get(PREFIX + 'hide_words', '');
+    }
+
+    function getSafeTitle(item) {
+        if (!item) return 'Контент';
+        var title = item.title || item.name || item.original_title || item.original_name || 'Контент';
+        if (typeof title === 'object' && title !== null) {
+            title = title.uk || title.ru || title.en || title.original || 'Контент';
+        }
+        return String(title);
+    }
+
+    function isMediaContent(item) {
+        if (!item || typeof item !== 'object') return false;
+
+        if (item.type && typeof item.type === 'string') {
+            var typeLower = item.type.toLowerCase();
+            if (['plugin', 'extension', 'theme', 'addon', 'hub', 'repository', 'script'].indexOf(typeLower) !== -1) return false;
+        }
+
+        if (item.author !== undefined || item.version !== undefined || item.url !== undefined ||
+            item.plugin !== undefined || item.extension !== undefined || item.installed !== undefined) {
+            return false;
+        }
+
+        var hasMediaFields = item.media_type !== undefined ||
+                             item.first_air_date !== undefined ||
+                             item.release_date !== undefined ||
+                             item.poster_path !== undefined ||
+                             item.backdrop_path !== undefined ||
+                             (item.genre_ids && Array.isArray(item.genre_ids)) ||
+                             (item.genres && Array.isArray(item.genres));
+
+        return Boolean(hasMediaFields);
+    }
+
+    // ========== Blacklist ==========
+    function getBlacklist() {
+        return Lampa.Storage.get(PREFIX + 'blacklist', []);
+    }
+
+    function setBlacklist(list) {
+        Lampa.Storage.set(PREFIX + 'blacklist', list);
+    }
+
+    function toggleBlacklist(cardData) {
+        var blacklist = getBlacklist();
+        var isBlocked = false;
+        var newList = [];
+
+        for (var i = 0; i < blacklist.length; i++) {
+            if (blacklist[i].id === cardData.id) isBlocked = true;
+            else newList.push(blacklist[i]);
+        }
+
+        var title = getSafeTitle(cardData);
+
+        if (isBlocked) {
+            setBlacklist(newList);
+            Lampa.Noty.show('"' + title + '" ' + Lampa.Lang.translate('blacklist_removed_suffix'));
+        } else {
+            newList.push({ id: cardData.id, title: title });
+            setBlacklist(newList);
+            Lampa.Noty.show('"' + title + '" ' + Lampa.Lang.translate('blacklist_added_suffix'));
+
+            // Плавне перемикання фокусу
+            var active = Lampa.Activity.active();
+            if (active && active.activity && active.activity.render) {
+                var focusEl = active.activity.render().find('.card.focus, .item.focus');
+                if (focusEl.length) {
+                    var next = focusEl.nextAll('.card:visible, .item:visible').first();
+                    if (!next.length) next = focusEl.prevAll('.card:visible, .item:visible').first();
+
+                    focusEl.css({ display: 'none', visibility: 'hidden' });
+
+                    setTimeout(function () {
+                        if (next.length) next.trigger('hover:focus');
+                        if (Lampa.Navigator && Lampa.Navigator.update) Lampa.Navigator.update();
+                    }, 50);
+                }
+            }
+        }
+    }
+
+    // ========== Filters ==========
+    var hideProcessor = {
+        filters: [
+            // Blacklist
+            function (items) {
+                var blacklist = getBlacklist();
+                if (blacklist.length === 0) return items;
+                return items.filter(function (item) {
+                    if (!isMediaContent(item)) return true;
+                    for (var i = 0; i < blacklist.length; i++) {
+                        if (blacklist[i].id === item.id) return false;
+                    }
+                    return true;
+                });
+            },
+            // Languages
+            function (items) {
+                var langsToHide = [];
+                if (settings.hide_ru)     langsToHide.push('ru');
+                if (settings.hide_asian)  langsToHide.push('ja', 'ko', 'zh', 'th', 'id');
+                if (settings.hide_in)     langsToHide.push('hi', 'te', 'ta', 'ml', 'kn');
+                if (settings.hide_tr)     langsToHide.push('tr');
+                if (settings.hide_ar)     langsToHide.push('ar');
+
+                var custom = (settings.hide_custom_langs || '').split(',')
+                    .map(function (s) { return s.trim().toLowerCase(); })
+                    .filter(Boolean);
+                langsToHide = langsToHide.concat(custom);
+
+                if (langsToHide.length === 0) return items;
+
+                return items.filter(function (item) {
+                    if (!isMediaContent(item)) return true;
+                    if (!item.original_language) return true;
+                    return langsToHide.indexOf(item.original_language.toLowerCase()) === -1;
+                });
+            },
+            // Untranslated
+            function (items) {
+                if (!settings.hide_untranslated) return items;
+                return items.filter(function (item) {
+                    if (!isMediaContent(item)) return true;
+                    return item.overview && item.overview.trim().length > 0;
+                });
+            },
+            // Rating
+            function (items) {
+                if (settings.hide_rating === 'none') return items;
+                var limit = parseFloat(settings.hide_rating);
+
+                return items.filter(function (item) {
+                    if (!isMediaContent(item)) return true;
+
+                    var isSpecial = item.media_type === 'video' ||
+                                    item.type === 'Trailer' ||
+                                    item.site === 'YouTube' ||
+                                    (item.key && item.name && item.name.toLowerCase().indexOf('trailer') !== -1);
+                    if (isSpecial) return true;
+
+                    if (!item.vote_average || item.vote_average === 0) return false;
+                    return item.vote_average >= limit;
+                });
+            },
+            // History / Watched
+            function (items) {
+                if (!settings.hide_history) return items;
+
+                var favorite = Lampa.Storage.get('favorite', '{}');
+                var timeline = Lampa.Storage.cache('timetable', 300, []);
+
+                return items.filter(function (item) {
+                    if (!isMediaContent(item) || !item.id) return true;
+
+                    var mediaType = item.media_type || (item.first_air_date ? 'tv' : 'movie');
+                    var card = Lampa.Favorite.check(item);
+                    var hasHistory = card && card.history;
+                    var isThrown = card && card.thrown;
+
+                    if (isThrown) return false;
+                    if (!hasHistory) return true;
+                    if (hasHistory && mediaType === 'movie') return false;
+
+                    var watchedFromFavorite = getWatchedEpisodesFromFavorite(item.id, favorite);
+                    var watchedFromTimeline = getWatchedEpisodesFromTimeline(item.id, timeline);
+                    var allWatched = mergeWatchedEpisodes(watchedFromFavorite, watchedFromTimeline);
+                    var title = item.original_title || item.original_name || item.title || item.name || '';
+
+                    return !isSeriesFullyWatched(title, allWatched);
+                });
+            },
+            // Words in title
+            function (items) {
+                var words = (settings.hide_words || '').split(',')
+                    .map(function (s) { return s.trim().toLowerCase(); })
+                    .filter(Boolean);
+                if (words.length === 0) return items;
+
+                return items.filter(function (item) {
+                    if (!isMediaContent(item)) return true;
+                    var title = getSafeTitle(item).toLowerCase();
+                    for (var i = 0; i < words.length; i++) {
+                        if (title.indexOf(words[i]) !== -1) return false;
+                    }
+                    return true;
+                });
+            }
+        ],
+        apply: function (data) {
+            var results = Lampa.Arrays.clone(data);
+            for (var i = 0; i < this.filters.length; i++) {
+                results = this.filters[i](results);
+            }
+            return results;
+        }
+    };
+
+    // ========== History helpers ==========
+    function getWatchedEpisodesFromFavorite(id, favoriteData) {
+        var card = (favoriteData.card || []).find(function (c) {
+            return c.id === id && Array.isArray(c.seasons) && c.seasons.length > 0;
+        });
+        if (!card) return [];
+        var airedSeasons = card.seasons.filter(function (s) {
+            return s.season_number > 0 && s.episode_count > 0 && s.air_date && new Date(s.air_date) < new Date();
+        });
+        var episodes = [];
+        airedSeasons.forEach(function (season) {
+            for (var ep = 1; ep <= season.episode_count; ep++) {
+                episodes.push({ season_number: season.season_number, episode_number: ep });
+            }
+        });
+        return episodes;
+    }
+
+    function getWatchedEpisodesFromTimeline(id, timelineData) {
+        var entry = (timelineData || []).find(function (e) { return e.id === id; }) || {};
+        if (!Array.isArray(entry.episodes) || entry.episodes.length === 0) return [];
+        return entry.episodes.filter(function (ep) {
+            return ep.season_number > 0 && ep.air_date && new Date(ep.air_date) < new Date();
+        });
+    }
+
+    function mergeWatchedEpisodes(arr1, arr2) {
+        var merged = (arr1 || []).concat(arr2 || []);
+        var unique = [];
+        merged.forEach(function (ep) {
+            var exists = unique.some(function (u) {
+                return u.season_number === ep.season_number && u.episode_number === ep.episode_number;
+            });
+            if (!exists) unique.push(ep);
+        });
+        return unique;
+    }
+
+    function isSeriesFullyWatched(title, watchedEpisodes) {
+        if (!watchedEpisodes || watchedEpisodes.length === 0) return false;
+        for (var i = 0; i < watchedEpisodes.length; i++) {
+            var ep = watchedEpisodes[i];
+            var hash = Lampa.Utils.hash([ep.season_number, ep.season_number > 10 ? ':' : '', ep.episode_number, title].join(''));
+            var view = Lampa.Timeline.view(hash);
+            if (!view || view.percent < 100) return false;
+        }
+        return true;
+    }
+
+    // ========== Localization ==========
+    function addTranslations() {
+        Lampa.Lang.add({
+            content_hiding:              { uk: 'Приховування контенту', en: 'Hide Content' },
+            content_hiding_desc:         { uk: 'Налаштування приховування небажаного контенту', en: 'Settings for hiding unwanted content' },
+            hide_ru:                     { uk: 'Приховати російський контент', en: 'Hide Russian content' },
+            hide_ru_desc:                { uk: 'Приховує картки з мовою оригіналу: ru', en: 'Hides cards with original language: ru' },
+            hide_asian:                  { uk: 'Приховати азійський контент', en: 'Hide Asian content' },
+            hide_asian_desc:             { uk: 'Приховує картки з мовами: ja, ko, zh, th, id', en: 'Hides cards with languages: ja, ko, zh, th, id' },
+            hide_in:                     { uk: 'Приховати індійський контент', en: 'Hide Indian content' },
+            hide_in_desc:                { uk: 'Приховує картки з мовами: hi, te, ta, ml, kn', en: 'Hides cards with languages: hi, te, ta, ml, kn' },
+            hide_tr:                     { uk: 'Приховати турецький контент', en: 'Hide Turkish content' },
+            hide_tr_desc:                { uk: 'Приховує картки з мовою оригіналу: tr', en: 'Hides cards with original language: tr' },
+            hide_ar:                     { uk: 'Приховати арабський контент', en: 'Hide Arabic content' },
+            hide_ar_desc:                { uk: 'Приховує картки з мовою оригіналу: ar', en: 'Hides cards with original language: ar' },
+            hide_untranslated:           { uk: 'Приховати контент без перекладу', en: 'Hide untranslated content' },
+            hide_untranslated_desc:      { uk: 'Приховує картки без опису', en: 'Hides cards without overview' },
+            hide_custom_langs:           { uk: 'Інші мови', en: 'Other languages' },
+            hide_custom_langs_desc:      { uk: 'Коди мов через кому (наприклад: pl,cs,sk)', en: 'Language codes separated by commas' },
+            hide_rating:                 { uk: 'Приховати низький рейтинг', en: 'Hide low rating' },
+            hide_rating_desc:            { uk: 'Приховує контент за рейтингом TMDb', en: 'Hides content based on TMDb rating' },
+            hide_rating_none:            { uk: 'Ні', en: 'No' },
+            hide_history:                { uk: 'Приховати переглянуте', en: 'Hide watched' },
+            hide_history_desc:           { uk: 'Приховує фільми та серіали з історії перегляду', en: 'Hides movies and series from viewing history' },
+            hide_words:                  { uk: 'Приховати за словами в назві', en: 'Hide by words in title' },
+            hide_words_desc:             { uk: 'Слова/фрази через кому', en: 'Words or phrases separated by commas' },
+            blacklist_manage:            { uk: 'Чорний список', en: 'Blacklist' },
+            blacklist_count:             { uk: 'Заблоковано карток', en: 'Blocked cards' },
+            blacklist_empty:             { uk: 'Чорний список порожній', en: 'Blacklist is empty' },
+            blacklist_remove_action:     { uk: 'Натисніть на назву, щоб видалити', en: 'Click on the title to remove' },
+            blacklist_clear_all:         { uk: 'Очистити весь список', en: 'Clear all list' },
+            blacklist_add:               { uk: 'Приховати', en: 'Hide' },
+            blacklist_added_suffix:      { uk: 'додано до чорного списку', en: 'added to blacklist' },
+            blacklist_removed_suffix:    { uk: 'видалено з чорного списку', en: 'removed from blacklist' }
+        });
+    }
+
+    function updateSettingsValue(el, value) {
+        var valEl = el.find('.settings-param__value');
+        if (!valEl.length) {
+            valEl = $('<div class="settings-param__value"></div>');
+            el.find('.settings-param__name').after(valEl);
+        }
+        valEl.text(value || '');
+    }
+
+    // ========== Settings UI ==========
+    function addSettings() {
+        Lampa.SettingsApi.addComponent({
+            component: 'content_hiding',
+            name: Lampa.Lang.translate('content_hiding'),
+            icon: '<svg height="24" viewBox="0 0 24 24" width="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>'
+        });
+
+        ['ru', 'asian', 'in', 'tr', 'ar', 'untranslated'].forEach(function (key) {
+            Lampa.SettingsApi.addParam({
+                component: 'content_hiding',
+                param: { name: PREFIX + 'hide_' + key, type: 'trigger', default: false },
+                field: {
+                    name: Lampa.Lang.translate('hide_' + key),
+                    description: Lampa.Lang.translate('hide_' + key + '_desc')
+                },
+                onChange: function (value) {
+                    settings['hide_' + key] = value;
+                    Lampa.Storage.set(PREFIX + 'hide_' + key, value);
+                }
+            });
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'content_hiding',
+            param: { name: PREFIX + 'hide_custom_langs', type: 'static', default: '' },
+            field: {
+                name: Lampa.Lang.translate('hide_custom_langs'),
+                description: Lampa.Lang.translate('hide_custom_langs_desc')
+            },
+            onRender: function (el) {
+                updateSettingsValue(el, settings.hide_custom_langs);
+                el.on('hover:enter', function () {
+                    Lampa.Input.edit({
+                        title: Lampa.Lang.translate('hide_custom_langs'),
+                        value: settings.hide_custom_langs,
+                        free: true,
+                        nosave: false
+                    }, function (new_value) {
+                        settings.hide_custom_langs = new_value;
+                        Lampa.Storage.set(PREFIX + 'hide_custom_langs', new_value);
+                        updateSettingsValue(el, new_value);
+                    });
+                });
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'content_hiding',
+            param: {
+                name: PREFIX + 'hide_rating',
+                type: 'select',
+                values: {
+                    'none': Lampa.Lang.translate('hide_rating_none'),
+                    '4.0': '< 4.0',
+                    '5.0': '< 5.0',
+                    '6.0': '< 6.0',
+                    '7.0': '< 7.0'
+                },
+                default: 'none'
+            },
+            field: {
+                name: Lampa.Lang.translate('hide_rating'),
+                description: Lampa.Lang.translate('hide_rating_desc')
+            },
+            onChange: function (value) {
+                settings.hide_rating = value;
+                Lampa.Storage.set(PREFIX + 'hide_rating', value);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'content_hiding',
+            param: { name: PREFIX + 'hide_history', type: 'trigger', default: false },
+            field: {
+                name: Lampa.Lang.translate('hide_history'),
+                description: Lampa.Lang.translate('hide_history_desc')
+            },
+            onChange: function (value) {
+                settings.hide_history = value;
+                Lampa.Storage.set(PREFIX + 'hide_history', value);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'content_hiding',
+            param: { name: PREFIX + 'hide_words', type: 'static', default: '' },
+            field: {
+                name: Lampa.Lang.translate('hide_words'),
+                description: Lampa.Lang.translate('hide_words_desc')
+            },
+            onRender: function (el) {
+                updateSettingsValue(el, settings.hide_words);
+                el.on('hover:enter', function () {
+                    Lampa.Input.edit({
+                        title: Lampa.Lang.translate('hide_words'),
+                        value: settings.hide_words,
+                        free: true,
+                        nosave: false
+                    }, function (new_value) {
+                        settings.hide_words = new_value;
+                        Lampa.Storage.set(PREFIX + 'hide_words', new_value);
+                        updateSettingsValue(el, new_value);
+                    });
+                });
+            }
+        });
+
+        // Менеджер чорного списку
+        Lampa.SettingsApi.addParam({
+            component: 'content_hiding',
+            param: { name: PREFIX + 'blacklist_manage', type: 'static' },
+            field: { name: Lampa.Lang.translate('blacklist_manage'), description: '' },
+            onRender: function (el) {
+                var updateCount = function () {
+                    updateSettingsValue(el, getBlacklist().length.toString());
+                };
+                updateCount();
+
+                el.on('hover:enter', function () {
+                    var list = getBlacklist();
+
+                    if (list.length === 0) {
+                        Lampa.Noty.show(Lampa.Lang.translate('blacklist_empty'));
+                        return;
+                    }
+
+                    var items = list.map(function (item) {
+                        return {
+                            title: item.title || ('ID: ' + item.id),
+                            id: item.id,
+                            template: 'selectbox_icon',
+                            icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>'
+                        };
+                    });
+
+                    items.unshift({
+                        title: Lampa.Lang.translate('blacklist_clear_all'),
+                        clear: true,
+                        template: 'selectbox_icon',
+                        icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>'
+                    });
+
+                    Lampa.Select.show({
+                        title: Lampa.Lang.translate('blacklist_manage') + ' (' + list.length + ')',
+                        items: items,
+                        onSelect: function (selected) {
+                            if (selected.clear) {
+                                setBlacklist([]);
+                                Lampa.Noty.show(Lampa.Lang.translate('blacklist_empty'));
+                                updateCount();
+                                Lampa.Controller.toggle('settings_component');
+                                return;
+                            }
+
+                            var newList = getBlacklist().filter(function (b) {
+                                return b.id !== selected.id;
+                            });
+                            setBlacklist(newList);
+                            Lampa.Noty.show('"' + selected.title + '" ' + Lampa.Lang.translate('blacklist_removed_suffix'));
+                            updateCount();
+                            Lampa.Controller.toggle('settings_component');
+                        },
+                        onBack: function () {
+                            Lampa.Controller.toggle('settings_component');
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    // ========== Card menu button ==========
+    function addCardMenu() {
+        Lampa.Listener.follow('card', function (event) {
+            if (event.type !== 'menu') return;
+
+            var card = event.data;
+            if (!card || !isMediaContent(card)) return;
+
+            var blacklist = getBlacklist();
+            var isBlocked = blacklist.some(function (b) { return b.id === card.id; });
+
+            event.menu.push({
+                title: isBlocked ?
+                    Lampa.Lang.translate('blacklist_removed_suffix') :
+                    Lampa.Lang.translate('blacklist_add'),
+                onSelect: function () {
+                    toggleBlacklist(card);
+                    Lampa.Controller.toggle('content');
+                }
+            });
+        });
+    }
+
+    // ========== Apply filters ==========
+    function isFilterApplicable(url) {
+        if (!url) return false;
+        // Не чіпаємо пошук і персон
+        if (url.indexOf('/search') !== -1 || url.indexOf('/person/') !== -1) return false;
+        return true;
+    }
+
+    function hasMorePage(data) {
+        return !!data &&
+               Array.isArray(data.results) &&
+               data.original_length !== data.results.length &&
+               data.page === 1 &&
+               !!data.total_pages &&
+               data.total_pages > 1;
+    }
+
+    function start() {
+        loadSettings();
+        addTranslations();
+        addSettings();
+        addCardMenu();
+
+        // Основний фільтр результатів
+        Lampa.Listener.follow('request_secuses', function (event) {
+            if (!event.data || !Array.isArray(event.data.results)) return;
+            if (!isFilterApplicable(event.params && event.params.url)) return;
+
+            if (!event.data.original_length) {
+                event.data.original_length = event.data.results.length;
+            }
+            event.data.results = hideProcessor.apply(event.data.results);
+        });
+
+        // Кнопка «Ще» після фільтрації (як у trash/history filter)
+        Lampa.Listener.follow('line', function (event) {
+            if (event.type !== 'visible' || !hasMorePage(event.data)) return;
+
+            var lineHeader$ = $(event.body.closest('.items-line')).find('.items-line__head');
+            if (lineHeader$.find('.items-line__more').length) return;
+
+            var button = document.createElement('div');
+            button.classList.add('items-line__more', 'selector');
+            button.innerText = Lampa.Lang.translate('more');
+
+            button.addEventListener('hover:enter', function () {
+                Lampa.Activity.push({
+                    url: event.data.url,
+                    title: event.data.title || Lampa.Lang.translate('title_category'),
+                    component: 'category_full',
+                    page: 1,
+                    genres: event.params.genres,
+                    filter: event.data.filter,
+                    source: event.data.source || (event.params.object && event.params.object.source)
+                });
+            });
+
+            lineHeader$.append(button);
+        });
+
+        Lampa.Listener.follow('line', function (event) {
+            if (event.type !== 'append' || !hasMorePage(event.data)) return;
+
+            if (event.items.length === event.data.results.length && Lampa.Controller.own(event.line)) {
+                Lampa.Controller.collectionAppend(event.line.more());
+            }
+        });
+    }
+
+    if (window.appready) {
+        start();
+    } else {
+        Lampa.Listener.follow('app', function (e) {
+            if (e.type === 'ready') start();
+        });
+    }
+})();
